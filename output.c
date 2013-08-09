@@ -35,6 +35,10 @@
 #endif
 #endif
 
+// For visualizer
+#include <pthread.h>
+#include <sys/mman.h>
+
 #if ALSA
 
 #define MAX_SILENCE_FRAMES 1024
@@ -84,6 +88,22 @@ static struct buffer buf;
 struct buffer *outputbuf = &buf;
 
 static bool running = true;
+
+
+#define VIS_SHM_PATH "squeezelite"
+#define VIS_BUF_SIZE 16384
+
+static struct vis_t {
+	pthread_rwlock_t rwlock;
+	unsigned buf_size;
+	unsigned buf_index;
+	output_state state;
+	unsigned rate;
+	char dummy[64];
+	int16_t buffer[VIS_BUF_SIZE];
+} * vis_mmap = NULL;
+
+int vis_fd = -1;
 
 #define LOCK   mutex_lock(outputbuf->mutex)
 #define UNLOCK mutex_unlock(outputbuf->mutex)
@@ -902,9 +922,25 @@ static void *output_thread(void *arg) {
 				}
 			}
 
- 			out_frames = !silence ? min(size, cont_frames) : size;
+			out_frames = !silence ? min(size, cont_frames) : size;
 
-#if ALSA			
+			if (vis_mmap) {
+				frames_t vis_cnt = out_frames;
+				s32_t *ptr  = (s32_t *) (silence ? silencebuf : outputbuf->readp);
+				pthread_rwlock_wrlock(&vis_mmap->rwlock);
+				while (vis_cnt--) {
+					vis_mmap->buffer[vis_mmap->buf_index++] =
+						(output.current_replay_gain ? gain(*(ptr++), output.current_replay_gain) : *(ptr++)) >> 16;
+					vis_mmap->buffer[vis_mmap->buf_index++] =
+						(output.current_replay_gain ? gain(*(ptr++), output.current_replay_gain) : *(ptr++)) >> 16;
+					if (vis_mmap->buf_index == VIS_BUF_SIZE) vis_mmap->buf_index = 0;
+				}
+				vis_mmap->state = output.state;
+				vis_mmap->rate = output.current_sample_rate;
+				pthread_rwlock_unlock(&vis_mmap->rwlock);
+			}
+
+#if ALSA
 			if (alsa.mmap || alsa.format != NATIVE_FORMAT) {
 
 				// in all alsa cases except NATIVE_FORMAT non mmap we take this path:
@@ -940,7 +976,7 @@ static void *output_thread(void *arg) {
 				void  *outputptr = alsa.mmap ? (areas[0].addr + (areas[0].first + offset * areas[0].step) / 8) : alsa.write_buf;
 				s32_t *inputptr  = (s32_t *) (silence ? silencebuf : outputbuf->readp);
 				frames_t cnt = out_frames;
-				
+
 				switch(alsa.format) {
 				case SND_PCM_FORMAT_S16_LE:
 					{
@@ -1328,7 +1364,7 @@ void _checkfade(bool start) {
 #if ALSA
 static pthread_t thread;
 void output_init(log_level level, const char *device, unsigned output_buf_size, unsigned alsa_buffer, unsigned alsa_period,
-				 const char *alsa_sample_fmt, bool mmap, unsigned max_rate, unsigned rt_priority) {
+				 const char *alsa_sample_fmt, bool mmap_flag, unsigned max_rate, unsigned rt_priority) {
 #endif
 #if PORTAUDIO
 	void output_init(log_level level, const char *device, unsigned output_buf_size, unsigned latency, int osx_playnice, unsigned max_rate) {
@@ -1355,7 +1391,7 @@ void output_init(log_level level, const char *device, unsigned output_buf_size, 
 	output.fade = FADE_INACTIVE;
 
 #if ALSA
-	alsa.mmap = mmap;
+	alsa.mmap = mmap_flag;
 	alsa.write_buf = NULL;
 	alsa.format = 0;
 	output.buffer = alsa_buffer;
@@ -1403,6 +1439,26 @@ void output_init(log_level level, const char *device, unsigned output_buf_size, 
 #if ALSA
 
 #if LINUX
+	if (!vis_mmap) {
+		vis_fd = shm_open(VIS_SHM_PATH, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
+		if (vis_fd != -1) {
+			if (ftruncate(vis_fd, sizeof(struct vis_t)) == 0) {
+				vis_mmap = (struct vis_t *)mmap(NULL, sizeof(struct vis_t), PROT_READ | PROT_WRITE, MAP_SHARED, vis_fd, 0);
+			}
+		}
+		if (vis_mmap == NULL) {
+			LOG_WARN("unable to open visualizer shm");
+		} else {
+			pthread_rwlockattr_t attr;
+			pthread_rwlockattr_init(&attr);
+			pthread_rwlockattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
+			pthread_rwlock_init(&vis_mmap->rwlock, &attr);
+			vis_mmap->buf_size = VIS_BUF_SIZE;
+			vis_mmap->state = output.state;
+			vis_mmap->rate = output.current_sample_rate;
+		}
+	}
+
 	// RT linux - aim to avoid pagefaults by locking memory: 
 	// https://rt.wiki.kernel.org/index.php/Threaded_RT-application_with_memory_locking_and_stack_handling_example
 	if (mlockall(MCL_CURRENT | MCL_FUTURE) == -1) {
@@ -1482,6 +1538,16 @@ void output_close(void) {
 	}
 	UNLOCK;
 #endif
+
+	if (vis_mmap) {
+		pthread_rwlock_destroy(&vis_mmap->rwlock);
+		munmap(vis_mmap, sizeof(struct vis_t));
+	}
+
+	if (vis_fd != -1) {
+		shm_unlink(VIS_SHM_PATH);
+		close(vis_fd);
+	}
 
 	buf_destroy(outputbuf);
 }
