@@ -95,11 +95,12 @@ static bool running = true;
 
 static struct vis_t {
 	pthread_rwlock_t rwlock;
-	unsigned buf_size;
-	unsigned buf_index;
+	u16_t buf_size;
+	u16_t buf_index;
 	output_state state;
-	unsigned rate;
-	char dummy[64];
+	u32_t rate;
+	u8_t mac[6];
+	u8_t dummy[64];
 	int16_t buffer[VIS_BUF_SIZE];
 } * vis_mmap = NULL;
 
@@ -121,6 +122,12 @@ static inline s32_t gain(s32_t gain, s32_t sample) {
 static inline s32_t to_gain(float f) {
 	return (s32_t)(f * 65536.0F);
 }
+
+void vis_set_mac(u8_t * mac) {
+	if (!vis_mmap || !mac) return;
+	memcpy(vis_mmap->mac, mac, 6);
+}
+
 
 #if ALSA
 

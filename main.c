@@ -308,6 +308,8 @@ int main(int argc, char **argv) {
 	}
 #endif
 
+	vis_set_mac(mac);
+
 	slimproto(log_slimproto, server, mac, name);
 	
 	decode_close();

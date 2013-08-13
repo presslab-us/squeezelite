@@ -461,6 +461,7 @@ struct outputstate {
 	unsigned fade_secs;        // set by slimproto
 };
 
+void vis_set_mac(u8_t * mac);
 void list_devices(void);
 #if ALSA
 void output_init(log_level level, const char *device, unsigned output_buf_size, unsigned alsa_buffer, unsigned alsa_period, const char *alsa_sample_fmt, bool mmap, unsigned max_rate, unsigned rt_priority);
